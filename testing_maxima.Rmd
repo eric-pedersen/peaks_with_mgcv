@@ -248,6 +248,7 @@ matplot(test_data$x,test_1st_deriv_CI,
         col="black",
         lty=c(2,1,2),
         main="first derivative and 95% CI",
+        xlab = "x",
         ylab=expression(dy/dx))
 if(any(candidate_peaks)){
   matplot(test_data$x[candidate_peaks], 
@@ -260,6 +261,7 @@ abline(h=0,lty=3,col="red")
 matplot(test_data$x,test_2nd_deriv_CI,type="l",
         col="black",lty=c(2,1,2),
         main="second derivative and 95% CI",
+        xlab = "x",
         ylab=expression(dy^2/dx^2))
 if(any(candidate_peaks)){
   matplot(test_data$x[candidate_peaks], 
