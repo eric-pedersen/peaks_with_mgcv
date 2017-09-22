@@ -1,11 +1,6 @@
----
-title: "Detecting extrema with GAMs"
-author: "Eric Pedersen"
-date: "September 22, 2017"
-output: 
-  html_document:
-    keep_md: true
----
+# Detecting extrema with GAMs
+Eric Pedersen  
+September 22, 2017  
 
 This code is to test how effective using a combination of penalized regression
 with `mgcv` and a test based on the estimated derivatives from the smooth term
@@ -15,33 +10,29 @@ just a region where the curve has flattened out. This was inspired by the work
 at [Data Colada](http://datacolada.org/62), using split linear regression to 
 test for extrema. I wanted to see how effective a GAM would be for this purpose.
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
+
 
 I'm relying on the `mgcv` package for fitting smooth terms, and the `dplyr`
 package for working with more complicated data frame manipulation.
 
-```{r packages,message=FALSE}
+
+```r
 library(dplyr)
 library(mgcv)
 
 #You need the multivariate normal RNG from the MASS package
 mvrnorm = MASS::mvrnorm
-
 ```
 
 
 
 
-```{r deriv_functions}
 
+```r
 # Functions to calculate the 1st and 2nd derivatives of a given time series with
 # a given step size. Uses two-point approximations for both 1st and 2nd derivs.
 calc_1st_deriv = function(y,delta) (lead(y,1) - lag(y,1))/(2*delta)
 calc_2nd_deriv = function(y,delta) (lead(y,1) + lag(y,1)-2*y)/delta^2
-
-
 ```
 
 This next function defines the test for peaks from the data. It requires you to
@@ -61,7 +52,8 @@ increases (decreases), pauses for a while, then continues increasing
 (decreasing).
 
 
-```{r peak_test_function}
+
+```r
 # Function to test if each the confidence intervals for the derivatives of a
 # given curve sastisfy the test for a point potentially being an extremum The
 # first deriv critera determines if the confidence intervals for the first 
@@ -117,8 +109,8 @@ Now I'll simulate some random data to test this. I'm assuming that the true
 function is a log curve up to a break point, then has a zero or negative slope 
 from that point on. I also assume x ranges between 0.1 and 4. 
 
-```{r simulating_data1}
 
+```r
 set.seed(46)
 
 
@@ -144,8 +136,6 @@ mid = 2
 training_data = data_frame(x = seq(low_lim,high_lim, length=n),
                            y= rnorm(n,fit_func(x,a,b,mid),sigma),
                            true_val = fit_func(x,a,b,mid) )
-
-
 ```
 
 Using the training data, I fitted a GAM with 20 basis functions, and m=3 to penalize 
@@ -154,16 +144,14 @@ long as it's large enough for mgcv's penalty estimation function to work, but
 if m<3, it becomes difficult to estimate the second derivative (basically, because
 new random functions drawn from the model posterior will have very wiggly 2nd derivatives). 
 
-```{r model}
 
+```r
 # The fitted model, usig a 20 basis function thin plate spline smoother with
 # REML fitting criteria. m=3 specifies that the model should penalize squard
 # third derivatives. This is important as if m=2 (the default) then prior
 # simulations from the fit are too wiggly, and end up with too wide a range of
 # 2nd derivatives
 mod = gam(y~s(x, bs= "tp", k=20,m = 3), data=training_data,method="REML")
-
-
 ```
 
 Using this model, and new data spread across a gradient, I simulated 500 new 
@@ -171,7 +159,8 @@ functions from the model posterior, and estimated the first and second
 derivatives for each point for each simulation. Using all of these, I estimated
 median and 95% CI for the derivatives at each point.
 
-```{r finding_derivs}
+
+```r
 # step size used for calculating derivatives
 step_size = 0.01
 
@@ -210,24 +199,24 @@ test_2nd_deriv_CI = t(apply(test_2nd_deriv ,
                             FUN = quantile,
                             probs=c(0.025,0.5, 0.975),
                             na.rm=T))
-
 ```
 
 
 Using these derivatives, I tested for peaks. The plots below highlight the candidate region
 selected by the test as extrema in red (if the test found any regions). 
 
-```{r candidates}
+
+```r
 # Using the CIs for 1st and 2nd derivatives to test for peaks
 candidate_peaks = as.vector(find_peaks(test_1st_deriv_CI[,c(1,3)], 
                                        test_2nd_deriv_CI[,c(1,3)],
                                        test = test))
 
 candidate_peaks = ifelse(is.na(candidate_peaks), F, candidate_peaks)
-
 ```
 
-```{r plots, fig.width=5, fig.height=8, fig.align='center'}
+
+```r
 par(mfrow=c(3,1),mar=c(5, 6, 4, 2) + 0.1)
 
 # Plot of raw data and model fit, with true function in blue and 
@@ -267,6 +256,6 @@ if(any(candidate_peaks)){
           type="l",col="red",lty=c(2,1,2),add = T)
 }
 abline(h=0, lty=3, col="red")
-
-
 ```
+
+<img src="testing_maxima_files/figure-html/plots-1.png" style="display: block; margin: auto;" />
