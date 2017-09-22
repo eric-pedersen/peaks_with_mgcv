@@ -1,0 +1,270 @@
+---
+title: "Detecting extrema with GAMs"
+author: "Eric Pedersen"
+date: "September 22, 2017"
+output: html_document
+---
+
+This code is to test how effective using a combination of penalized regression
+with `mgcv` and a test based on the estimated derivatives from the smooth term
+does in estimating whether a given data set has a "U" shape (with an interior
+maxima or minima), and seeing how well this test can tell a maxima/minima from
+just a region where the curve has flattened out. This was inspired by the work
+at [Data Colada](http://datacolada.org/62), using split linear regression to 
+test for extrema. I wanted to see how effective a GAM would be for this purpose.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+I'm relying on the `mgcv` package for fitting smooth terms, and the `dplyr`
+package for working with more complicated data frame manipulation.
+
+```{r packages,message=FALSE}
+library(dplyr)
+library(mgcv)
+
+#You need the multivariate normal RNG from the MASS package
+mvrnorm = MASS::mvrnorm
+
+```
+
+
+
+
+```{r deriv_functions}
+
+# Functions to calculate the 1st and 2nd derivatives of a given time series with
+# a given step size. Uses two-point approximations for both 1st and 2nd derivs.
+calc_1st_deriv = function(y,delta) (lead(y,1) - lag(y,1))/(2*delta)
+calc_2nd_deriv = function(y,delta) (lead(y,1) + lag(y,1)-2*y)/delta^2
+
+
+```
+
+This next function defines the test for peaks from the data. It requires you to
+pass it two nx2 matrices: the first one is the confidence intervals for the
+first derivatives of all evaluated points. the second matrix is the same for the
+second derivatives.
+
+I've implemented two separate tests for peaks: the two-derivative test
+(`test="two-deriv"`) and the crossing test (`test="crossing"`). The first test
+assumes a given point is a candidate peak if the confidence interval for the
+first derivative of that point includes zero and the CI for the 2nd derivative
+does not. The second test defines a set of points as candidates if all the CIs
+for the first derivative include zero and the first significant points at the
+start and end of the interval have first derivatives of opposite signs (this
+rules out maxima at the ends of the range, or places where the function
+increases (decreases), pauses for a while, then continues increasing
+(decreasing).
+
+
+```{r peak_test_function}
+# Function to test if each the confidence intervals for the derivatives of a
+# given curve sastisfy the test for a point potentially being an extremum The
+# first deriv critera determines if the confidence intervals for the first 
+# derivative at a given point overlaps zero. The second deriv criteria tests if
+# the second deriv CI overlaps zero. A point is only considered to be a 
+# candidate extremum if the first criteria is true and the second is false
+find_peaks = function(deriv_1_bounds, 
+                      deriv_2_bounds, 
+                      test = c("two-deriv","crossing")){
+  
+  stopifnot(nrow(deriv_1_bounds)==nrow(deriv_2_bounds))
+  stopifnot(ncol(deriv_1_bounds)==2&ncol(deriv_2_bounds)==2)
+  
+  n_vals = nrow(deriv_1_bounds)
+  
+  # calculate the sign of the derivatives. If both ends of the interval are pos/neg
+  # at a point, this will return a value of +1/-1 for that point. It will be zero
+  # iff the CI overlaps zero at that point.
+  deriv1_sign = (sign(deriv_1_bounds[,1]) + sign(deriv_1_bounds[,2]))/2
+  deriv2_sign  = (sign(deriv_2_bounds[,1]) + sign(deriv_2_bounds[,2]))/2
+  
+  #Derivative series start with na values
+  #This removes that issue (to prevent a run of na values)
+  deriv1_sign[c(1,n_vals)] = deriv1_sign[c(2, n_vals-1)] 
+  deriv2_sign[c(1,n_vals)] = deriv2_sign[c(2, n_vals-1)] 
+  
+  if(test[1]=="two-deriv"){
+    is_candidate = (deriv1_sign==0)&(deriv2_sign!=0)
+  }else if(test[1] =="crossing"){
+    deriv1_runs = rle(deriv1_sign)
+    n_runs = length(deriv1_runs$lengths)
+    deriv1_run_start = c(1, cumsum(deriv1_runs$lengths)[-n_runs]+1)
+    deriv1_run_end = cumsum(deriv1_runs$lengths)
+    deriv1_run_sign = deriv1_runs$values
+    is_candidate = rep(FALSE, times=nrow(deriv_1_bounds))
+    for(i in 1:n_runs){
+      if(i>1&i<n_runs & deriv1_run_sign[i]==0){
+        if(deriv1_sign[deriv1_run_start[i-1]]*deriv1_sign[deriv1_run_end[i+1]]==-1){
+          is_candidate[deriv1_run_start[i]:deriv1_run_end[i]] = TRUE
+        }
+      }
+    }
+  }else {
+    stop("this is not an implemented test")
+  }
+  is_candidate
+}
+```
+
+
+
+Now I'll simulate some random data to test this. I'm assuming that the true
+function is a log curve up to a break point, then has a zero or negative slope 
+from that point on. I also assume x ranges between 0.1 and 4. 
+
+```{r simulating_data1}
+
+set.seed(46)
+
+
+# function for generating underlying curve. Simple sum of a log-curve and a
+# quadratic parameters a,b determine how large the log and quadratic components
+# are, mid determines where the center of the quadratic is
+fit_func = function(x, a,b,mid)  ifelse(x<mid, a*log(x), a*log(mid) -b*(x-mid))
+
+n = 100         # number of data points
+sigma = 1           # st. dev. of errors around mean value
+
+#Parmaters determining how large the range of x is
+low_lim = 0.1
+high_lim =4
+
+# parameters for the true function
+a   = 1    
+b   = 0.2
+mid = 2
+
+
+# data frame with x, values, random y values, and the true curve
+training_data = data_frame(x = seq(low_lim,high_lim, length=n),
+                           y= rnorm(n,fit_func(x,a,b,mid),sigma),
+                           true_val = fit_func(x,a,b,mid) )
+
+
+```
+
+Using the training data, I fitted a GAM with 20 basis functions, and m=3 to penalize 
+squared third derivatives. The number of basis functions isn't that important, as
+long as it's large enough for mgcv's penalty estimation function to work, but 
+if m<3, it becomes difficult to estimate the second derivative (basically, because
+new random functions drawn from the model posterior will have very wiggly 2nd derivatives). 
+
+```{r model}
+
+# The fitted model, usig a 20 basis function thin plate spline smoother with
+# REML fitting criteria. m=3 specifies that the model should penalize squard
+# third derivatives. This is important as if m=2 (the default) then prior
+# simulations from the fit are too wiggly, and end up with too wide a range of
+# 2nd derivatives
+mod = gam(y~s(x, bs= "tp", k=20,m = 3), data=training_data,method="REML")
+
+
+```
+
+Using this model, and new data spread across a gradient, I simulated 500 new 
+functions from the model posterior, and estimated the first and second
+derivatives for each point for each simulation. Using all of these, I estimated
+median and 95% CI for the derivatives at each point.
+
+```{r finding_derivs}
+# step size used for calculating derivatives
+step_size = 0.01
+
+# The test data, with one x per step unit across the range.
+test_data = data_frame(x=seq(low_lim, high_lim,by= step_size))
+
+#Simulate new functions from the posterior distribution of functions, using the
+#test data and 500 simulations
+n_sims = 500
+mod_coef = coef(mod) # mean values for all basis functions
+mod_vcov =vcov(mod)  # posterior variance-covariance matrix
+mod_sims = mvrnorm(n_sims, mod_coef,mod_vcov) #random parameter draws
+test_lp = predict.gam(mod,newdata = test_data,type = "lpmatrix") #the basis functions 
+test_sims = test_lp %*% t(mod_sims) #random parameters times basis functions
+
+test = "crossing" #change this to "two-deriv" to check the alternate test
+
+#Calculates estimated first and second derivatives 
+test_1st_deriv = apply(test_sims,MARGIN = 2,calc_1st_deriv, delta= step_size)
+test_2nd_deriv = apply(test_sims,MARGIN = 2,calc_2nd_deriv, delta= step_size)
+
+
+# 95% confidence intervals for the function, 1st, and 2nd derivatives
+test_CI = t(apply(test_sims,
+                  MARGIN = 1,
+                  FUN = quantile,
+                  probs=c(0.025,0.5,0.975),
+                  na.rm=T))
+test_1st_deriv_CI = t(apply(test_1st_deriv ,
+                            MARGIN = 1,
+                            FUN = quantile,
+                            probs=c(0.025,0.5,0.975),
+                            na.rm=T))
+test_2nd_deriv_CI = t(apply(test_2nd_deriv ,
+                            MARGIN = 1,
+                            FUN = quantile,
+                            probs=c(0.025,0.5, 0.975),
+                            na.rm=T))
+
+```
+
+
+Using these derivatives, I tested for peaks. The plots below highlight the candidate region
+selected by the test as extrema in red (if the test found any regions). 
+
+```{r candidates}
+# Using the CIs for 1st and 2nd derivatives to test for peaks
+candidate_peaks = as.vector(find_peaks(test_1st_deriv_CI[,c(1,3)], 
+                                       test_2nd_deriv_CI[,c(1,3)],
+                                       test = test))
+
+candidate_peaks = ifelse(is.na(candidate_peaks), F, candidate_peaks)
+
+```
+
+```{r plots, fig.width=5, fig.height=8, fig.align='center'}
+par(mfrow=c(3,1),mar=c(5, 6, 4, 2) + 0.1)
+
+# Plot of raw data and model fit, with true function in blue and 
+# estimated minima in red. Vertical blue line is the true minimum
+plot(y~x, data= training_data, main="raw data and estimated model")
+points(true_val~x, data=training_data, col="blue",type="l",lwd=1)
+matplot(test_data$x, test_CI,type="l",col="black",lty=c(2,1,2),add = T)
+if(any(candidate_peaks)){
+  matplot(test_data$x[candidate_peaks], test_CI[candidate_peaks,],
+          type="l",col="red",lty=c(2,1,2),add = T)
+}
+abline(v= mid, col="blue",lty=2)
+
+
+#plot of first derivatives plus CI
+matplot(test_data$x,test_1st_deriv_CI,
+        type="l",
+        col="black",
+        lty=c(2,1,2),
+        main="first derivative and 95% CI",
+        ylab=expression(dy/dx))
+if(any(candidate_peaks)){
+  matplot(test_data$x[candidate_peaks], 
+          test_1st_deriv_CI[candidate_peaks,],
+          type="l",col="red",lty=c(2,1,2),add = T)
+}
+abline(h=0,lty=3,col="red")
+
+#Plot of estimated 2nd derivative plus CI
+matplot(test_data$x,test_2nd_deriv_CI,type="l",
+        col="black",lty=c(2,1,2),
+        main="second derivative and 95% CI",
+        ylab=expression(dy^2/dx^2))
+if(any(candidate_peaks)){
+  matplot(test_data$x[candidate_peaks], 
+          test_2nd_deriv_CI[candidate_peaks,],
+          type="l",col="red",lty=c(2,1,2),add = T)
+}
+abline(h=0, lty=3, col="red")
+
+
+```
